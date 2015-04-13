@@ -1,0 +1,2 @@
+= Oracle Dashboard in Go with termui
+Egor Starostin <egorst@gmail.com>
