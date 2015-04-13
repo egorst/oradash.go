@@ -23,11 +23,18 @@ func main() {
 }
 
 func testSelect(db *sql.DB) error {
-    rows, err := db.Query("select 1,'bar' from dual")
+    rows, err := db.Query("select name from gv$database")
     if err != nil {
         return err
     }
     defer rows.Close()
-    db.Exec("create table zz (f1 number)")
+    for rows.Next() {
+        var namedb string
+        if err = rows.Scan(&namedb); err != nil {
+            return err
+        }
+        got := fmt.Sprintf("'%s'",namedb)
+        fmt.Println("connected to ",got)
+    }
     return nil
 }
