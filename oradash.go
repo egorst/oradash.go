@@ -3,80 +3,466 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	//    "strings"
-	//    "os"
-	"github.com/gizak/termui"
+	"log"
+	"time"
+
+	ui "github.com/gizak/termui"
+	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-oci8"
 )
 
-func main() {
-	err := termui.Init()
-	if err != nil {
-		fmt.Println(err)
-	}
-	defer termui.Close()
-	db, err := sql.Open("oci8", "tools/catch22")
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	defer db.Close()
-	if err = testSelect(db); err != nil {
-		fmt.Println(err)
-		return
-	}
-	<-termui.EventCh()
+type instanceSummary struct {
+	iname   string
+	ctime   string
+	history string
+	execs   float32
+	calls   float32
+	commits float32
+	sparse  float32
+	hparse  float32
+	cchits  float32
+	lios    float32
+	phyrd   float32
+	phywr   float32
+	readmb  float32
+	writemb float32
+	redomb  float32
 }
 
-func testSelect(db *sql.DB) error {
-	rows, err := db.Query(`SELECT * FROM (
-    SELECT /*+ LEADING(a) USE_HASH(u) */
-      COUNT(*) totalseconds
-      , ROUND((COUNT(*) / 300), 1) AAS
-      , LPAD(ROUND(RATIO_TO_REPORT(COUNT(*)) OVER () * 100)||'%',5,' ') percent
-      , session_id
-      , TO_CHAR(MIN(sample_time), 'YYYY-MM-DD HH24:MI:SS') first_seen
-      , TO_CHAR(MAX(sample_time), 'YYYY-MM-DD HH24:MI:SS') last_seen
-    FROM
-        (SELECT
-             a.*
-           , TO_CHAR(CASE WHEN session_state = 'WAITING' THEN p1 ELSE null END, '0XXXXXXXXXXXXXXX') p1hex
-           , TO_CHAR(CASE WHEN session_state = 'WAITING' THEN p2 ELSE null END, '0XXXXXXXXXXXXXXX') p2hex
-           , TO_CHAR(CASE WHEN session_state = 'WAITING' THEN p3 ELSE null END, '0XXXXXXXXXXXXXXX') p3hex
-        FROM gv$active_session_history a) a
-      , dba_users u
-    WHERE
-        a.user_id = u.user_id (+)
-    AND sample_time BETWEEN systimestamp-5/1440 AND systimestamp
-    GROUP BY session_id
-    ORDER BY TotalSeconds DESC, session_id
-)
-WHERE ROWNUM <= 5
-`)
+type SessionRecord struct {
+	Ashtime          int            `db:"ASHTIME"`
+	Sid              int            `db:"SID"`
+	Serial           int            `db:"SERIAL#"`
+	Username         sql.NullString `db:"USERNAME"`
+	Machine          sql.NullString `db:"MACHINE"`
+	Program          sql.NullString `db:"PROGRAM"`
+	Sql_id           sql.NullString `db:"SQL_ID"`
+	Sql_child_number sql.NullInt64  `db:"SQL_CHILD_NUMBER"`
+	Blocking_session sql.NullString `db:"BLOCKING_SESSION"`
+	Event            sql.NullString `db:"EVENT"`
+	Wait_class       sql.NullString `db:"WAIT_CLASS"`
+	Wait_time        sql.NullString `db:"WAIT_TIME"`
+	Seconds_in_wait  sql.NullString `db:"SECONDS_IN_WAIT"`
+}
+
+var stat1, stat2 map[string]int
+
+func main() {
+
+	db, err := sqlx.Connect("oci8", "tools/nothere")
 	if err != nil {
 		panic(err)
-		return err
 	}
-	defer rows.Close()
-	var got string
-	for rows.Next() {
-		var totalseconds string
-		var aas int
-		var percent string
-		var session_id string
-		var first_seen string
-		var last_seen string
-		if err = rows.Scan(&totalseconds, &aas, &percent, &session_id, &first_seen, &last_seen); err != nil {
-			return err
+	defer db.Close()
+
+	stat2, err = db_get_stats(db)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	ashpoll(db)
+
+	err = ui.Init()
+	if err != nil {
+		panic(err)
+	}
+	defer ui.Close()
+
+	instSum := ui.NewTable() //NewPar(formatInstanceSummary(instanceSummary{iname: "db"}))
+	instSum.BorderLabel = " INSTANCE SUMMARY "
+	instSum.Separator = false
+	instSum.Height = 5
+	instSum.Width = 111
+	//instSum.CellWidth = []int{24, 17, 17, 16, 19} // 110
+	instSum.X = 0
+	instSum.Y = 0
+	//instSum.SetSize()
+	is := getInstanceSummary(db)
+	instSum.Rows = [][]string{
+		/*return fmt.Sprintf(" Instance: %-14s  | Execs/s: %8.1f | sParse/s: %7.1f | LIOs/s: %8.1f | Read MB/s: %8.1f\n", is.iname, is.execs, is.sparse, is.lios, is.readmb) +
+		fmt.Sprintf(" Cur Time: %-14s | Calls/s: %8.1f | hParse/s: %7.1f | PhyRD/s: %7.1f | Writ MB/s: %8.1f\n", ctime, is.calls, is.hparse, is.phyrd, is.writemb) +
+		fmt.Sprintf(" History: %-16s | Commits: %8.1f | ccHits/s: %7.1f | PhyWR/s: %7.1f | Redo MB/s: %8.1f", "", is.commits, is.cchits, is.phywr, is.redomb) */
+		[]string{
+			fmt.Sprintf("Instance: %14s", is.iname),
+			fmt.Sprintf("Execs/s: %8.1f", is.execs),
+			fmt.Sprintf("sParse/s: %7.1f", is.sparse),
+			fmt.Sprintf("LIOs/s: %8.1f", is.lios),
+			fmt.Sprintf("Read MB/s: %8.1f", is.readmb),
+		},
+		[]string{
+			fmt.Sprintf("Cur Time: %14s", is.ctime),
+			fmt.Sprintf("Calls/s: %8.1f", is.calls),
+			fmt.Sprintf("hParse/s: %7.1f", is.hparse),
+			fmt.Sprintf("PhyRD/s: %7.1f", is.phyrd),
+			fmt.Sprintf("Writ MB/s: %8.1f", is.writemb),
+		},
+		[]string{
+			fmt.Sprintf("History: %16s", is.history),
+			fmt.Sprintf("Commits: %8.1f", is.commits),
+			fmt.Sprintf("ccHits/s: %7.1f", is.cchits),
+			fmt.Sprintf("PhyWR/s: %7.1f", is.phywr),
+			fmt.Sprintf("Redo MB/s: %8.1f", is.redomb),
+		},
+	}
+	ui.Render(instSum)
+
+	topSqlId := ui.NewPar("")
+	topSqlId.Height = 5
+	topSqlId.Width = 31
+	topSqlId.X = 0
+	topSqlId.Y = 5
+	topSqlId.BorderLabel = " TOP SQL_ID (child#) "
+
+	topSess := ui.NewPar("")
+	topSess.Height = 5
+	topSess.Width = 22
+	topSess.X = 30
+	topSess.Y = 5
+	topSess.BorderLabel = " TOP SESSIONS "
+
+	topWaits := ui.NewPar("")
+	topWaits.Height = 5
+	topWaits.Width = 43
+	topWaits.X = 52
+	topWaits.Y = 5
+	topWaits.BorderLabel = " TOP WAITS "
+
+	waitClass := ui.NewPar("")
+	waitClass.Height = 5
+	waitClass.Width = 17
+	waitClass.X = 94
+	waitClass.Y = 5
+	waitClass.BorderLabel = " WAIT CLASS "
+
+	sqlId := ui.NewPar("")
+	sqlId.Height = 10
+	sqlId.Width = 16
+	sqlId.X = 0
+	sqlId.Y = 10
+	sqlId.BorderLabel = " SQL_ID "
+
+	planHashValue := ui.NewPar("")
+	planHashValue.Height = 10
+	planHashValue.Width = 19
+	planHashValue.X = 15
+	planHashValue.Y = 10
+	planHashValue.BorderLabel = " PLAN_HASH_VALUE"
+
+	sqlText := ui.NewPar("")
+	sqlText.Height = 10
+	sqlText.Width = 78
+	sqlText.X = 33
+	sqlText.Y = 10
+	sqlText.BorderLabel = " SQL_TEXT "
+
+	ui.Handle("/sys/kbd/q", func(e ui.Event) {
+		ui.StopLoop()
+	})
+
+	instSum.Handle("/timer/1s", func(e ui.Event) {
+		t := e.Data.(ui.EvtTimer)
+		if t.Count%5 != 0 {
+			return
 		}
-		got += fmt.Sprintf("%10s\t%6d\t%10s\t%10s\t%14s\t%14s\n", totalseconds, aas, percent, session_id, first_seen, last_seen)
+		is = getInstanceSummary(db)
+		instSum.Rows = [][]string{
+			/*return fmt.Sprintf(" Instance: %-14s  | Execs/s: %8.1f | sParse/s: %7.1f | LIOs/s: %8.1f | Read MB/s: %8.1f\n", is.iname, is.execs, is.sparse, is.lios, is.readmb) +
+			fmt.Sprintf(" Cur Time: %-14s | Calls/s: %8.1f | hParse/s: %7.1f | PhyRD/s: %7.1f | Writ MB/s: %8.1f\n", ctime, is.calls, is.hparse, is.phyrd, is.writemb) +
+			fmt.Sprintf(" History: %-16s | Commits: %8.1f | ccHits/s: %7.1f | PhyWR/s: %7.1f | Redo MB/s: %8.1f", "", is.commits, is.cchits, is.phywr, is.redomb) */
+			[]string{
+				fmt.Sprintf("Instance: %14s", is.iname),
+				fmt.Sprintf("Execs/s: %8.1f", is.execs),
+				fmt.Sprintf("sParse/s: %7.1f", is.sparse),
+				fmt.Sprintf("LIOs/s: %8.1f", is.lios),
+				fmt.Sprintf("Read MB/s: %8.1f", is.readmb),
+			},
+			[]string{
+				fmt.Sprintf("Cur Time: %14s", is.ctime),
+				fmt.Sprintf("Calls/s: %8.1f", is.calls),
+				fmt.Sprintf("hParse/s: %7.1f", is.hparse),
+				fmt.Sprintf("PhyRD/s: %7.1f", is.phyrd),
+				fmt.Sprintf("Writ MB/s: %8.1f", is.writemb),
+			},
+			[]string{
+				fmt.Sprintf("History: %16s", is.history),
+				fmt.Sprintf("Commits: %8.1f", is.commits),
+				fmt.Sprintf("ccHits/s: %7.1f", is.cchits),
+				fmt.Sprintf("PhyWR/s: %7.1f", is.phywr),
+				fmt.Sprintf("Redo MB/s: %8.1f", is.redomb),
+			},
+		}
+		sqlids := ashTopSqlids(db)
+		sqlidtext := ""
+		for _, s := range sqlids {
+			if s.Sql_id.Valid {
+				sqlidtext += fmt.Sprintf("\n %3d%% | %10s (%d)", s.Seconds*100/(5*60), s.Sql_id.String, s.Sql_child_number.Int64)
+			}
+		}
+		if len(sqlidtext) > 0 {
+			topSqlId.Text = sqlidtext[1:]
+		} else {
+			topSqlId.Text = ""
+		}
+
+		sql_ids, plans, sqltexts := getSqls(db, sqlids)
+		sqlId.Text = sql_ids
+		planHashValue.Text = plans
+		sqlText.Text = sqltexts
+
+		sids := ashTopSids(db)
+		topSess.Text = sids
+
+		events, wait_classes := ashTopEvents(db)
+		topWaits.Text = events
+		waitClass.Text = wait_classes
+		//instSum.Text = formatInstanceSummary(getInstanceSummary(db))
+		ui.Render(instSum, topSqlId, topSess, topWaits, waitClass, sqlId, planHashValue, sqlText)
+	})
+
+	sqlids := ashTopSqlids(db)
+	sqlidtext := ""
+	for _, s := range sqlids {
+		if s.Sql_id.Valid {
+			sqlidtext += fmt.Sprintf("\n %3d%% | %10s (%d)", s.Seconds*100/(5*60), s.Sql_id.String, s.Sql_child_number.Int64)
+		}
 	}
-	par := termui.NewPar(got)
-	par.Height = 4
-	par.Border.Label = "Top 5 Sessions"
-	termui.Body.AddRows(termui.NewRow(termui.NewCol(12, 0, par)))
-	termui.Body.Align()
-	termui.Render(termui.Body)
-	//fmt.Println("connected to ", got)
-	return nil
+	if len(sqlidtext) > 0 {
+		topSqlId.Text = sqlidtext[1:]
+	} else {
+		topSqlId.Text = ""
+	}
+
+	sql_ids, plans, sqltexts := getSqls(db, sqlids)
+	sqlId.Text = sql_ids
+	planHashValue.Text = plans
+	sqlText.Text = sqltexts
+
+	sids := ashTopSids(db)
+	topSess.Text = sids
+
+	events, wait_classes := ashTopEvents(db)
+	topWaits.Text = events
+	waitClass.Text = wait_classes
+
+	ui.Render(instSum, topSqlId, topSess, topWaits, waitClass, sqlId, planHashValue, sqlText)
+
+	ui.Loop()
+}
+
+func formatInstanceSummary(is instanceSummary) string {
+	var ctime = time.Now().Format("02 Jan 15:04:05")
+	return fmt.Sprintf(" Instance: %-14s  | Execs/s: %8.1f | sParse/s: %7.1f | LIOs/s: %8.1f | Read MB/s: %8.1f\n", is.iname, is.execs, is.sparse, is.lios, is.readmb) +
+		fmt.Sprintf(" Cur Time: %-14s | Calls/s: %8.1f | hParse/s: %7.1f | PhyRD/s: %7.1f | Writ MB/s: %8.1f\n", ctime, is.calls, is.hparse, is.phyrd, is.writemb) +
+		fmt.Sprintf(" History: %-16s | Commits: %8.1f | ccHits/s: %7.1f | PhyWR/s: %7.1f | Redo MB/s: %8.1f", "", is.commits, is.cchits, is.phywr, is.redomb)
+}
+
+func getInstanceSummary(db *sqlx.DB) instanceSummary {
+	var is instanceSummary
+	var iname string
+	var tdiff float32
+	stat1 = stat2
+	stat2, err := db_get_stats(db)
+	if err != nil {
+		fmt.Println(err)
+	}
+	err = db.Get(&iname, "select instance_name from gv$instance")
+	if err != nil {
+		is.iname = "?"
+	} else {
+		is.iname = iname
+	}
+	tdiff = float32((stat2["timer"] - stat1["timer"])) / 100
+	is.execs = float32(stat2["execute count"]-stat1["execute count"]) / tdiff
+	is.calls = float32(stat2["user calls"]-stat1["user calls"]) / tdiff
+	is.commits = float32(stat2["user commits"]-stat1["user commits"]) / tdiff
+	is.sparse = float32(stat2["parse count (total)"]-stat1["parse count (total)"]) / tdiff
+	is.hparse = float32(stat2["parse count (hard)"]-stat1["parse count (hard)"]) / tdiff
+	is.cchits = float32(stat2["session cursor cache hits"]-stat1["session cursor cache hits"]) / tdiff
+	is.lios = float32(stat2["session logical reads"]-stat1["session logical reads"]) / tdiff
+	is.phyrd = float32(stat2["physical read total IO requests"]-stat1["physical read total IO requests"]) / tdiff
+	is.phywr = float32(stat2["physical write total IO requests"]-stat1["physical write total IO requests"]) / tdiff
+	is.readmb = float32(stat2["physical read total bytes"]-stat1["physical read total bytes"]) / tdiff / 1024 / 1024
+	is.writemb = float32(stat2["physical write total bytes"]-stat1["physical write total bytes"]) / tdiff / 1024 / 1024
+	is.redomb = float32(stat2["redo size"]-stat1["redo size"]) / tdiff
+	is.ctime = time.Now().Format("01-02 15:04:05")
+	return is
+}
+
+func ashpoll(db *sqlx.DB) {
+	sessRecs := []SessionRecord{}
+	selectVSession := `select 
+  dbms_utility.get_time() ashtime,
+  sid,
+  serial#,
+  username,
+  machine,
+  program,
+  sql_id,
+  sql_child_number,
+  blocking_session,
+  case when state = 'WAITING' then event else 'ON CPU' end event,
+  case when state = 'WAITING' then wait_class else 'ON CPU' end wait_class,
+  wait_time,
+  seconds_in_wait
+from v$session
+where 
+  status = 'ACTIVE'
+  and (wait_class != 'Idle' or state != 'WAITING')
+  --and sid != sys_context('userenv', 'sid')`
+	err := db.Select(&sessRecs, selectVSession)
+	if err != nil {
+		log.Println(err)
+	}
+}
+
+type SqlidRow struct {
+	Sql_id           sql.NullString `db:"SQL_ID"`
+	Sql_child_number sql.NullInt64  `db:"SQL_CHILD_NUMBER"`
+	Seconds          int            `db:"SECONDS"`
+}
+
+func ashTopSqlids(db *sqlx.DB) []SqlidRow {
+	var sqlidRows []SqlidRow
+	var r SqlidRow
+	rows, err := db.Queryx(`select * from 
+	(select sql_id, sql_child_number, count(*) seconds 
+	 from gv$active_session_history 
+	 where sample_time >= sysdate-5/1440 group by sql_id,sql_child_number order by 3 desc
+	)
+	where rownum < 4`)
+	if err != nil {
+		log.Println(err)
+	}
+	for rows.Next() {
+		rows.StructScan(&r)
+		sqlidRows = append(sqlidRows, r)
+	}
+	return sqlidRows
+}
+
+type SessionRow struct {
+	Sid     sql.NullString `db:"SESSION_ID"`
+	Serial  sql.NullString `db:"SESSION_SERIAL#"`
+	Seconds int            `db:"SECONDS"`
+}
+
+func ashTopSids(db *sqlx.DB) string {
+	var r SessionRow
+	res := ""
+	rows, err := db.Queryx(`select * from 
+	(select session_id, session_serial#, count(*) seconds 
+	 from gv$active_session_history 
+	 where sample_time >= sysdate-5/1440 group by session_id,session_serial# order by 3 desc
+	)
+	where rownum < 4`)
+	if err != nil {
+		log.Println(err)
+	}
+	for rows.Next() {
+		rows.StructScan(&r)
+		res += fmt.Sprintf("\n %3d%% | %s.%s", r.Seconds*100/(5*60), r.Sid.String, r.Serial.String)
+	}
+	if len(res) > 0 {
+		res = res[1:]
+	}
+	return res
+}
+
+type EventRow struct {
+	Event      sql.NullString `db:"EVENT"`
+	Wait_class sql.NullString `db:"WAIT_CLASS"`
+	Seconds    int            `db:"SECONDS"`
+}
+
+func ashTopEvents(db *sqlx.DB) (string, string) {
+	var r EventRow
+	events := ""
+	wait_classes := ""
+	rows, err := db.Queryx(`select * from 
+	(select event, wait_class , count(*) seconds 
+	 from gv$active_session_history 
+	 where sample_time >= sysdate-5/1440 group by event, wait_class order by 3 desc
+	)
+	where rownum < 4`)
+	if err != nil {
+		log.Println(err)
+	}
+	for rows.Next() {
+		rows.StructScan(&r)
+		if r.Event.Valid {
+			events += fmt.Sprintf("\n %3d%% | %s", r.Seconds*100/(5*60), r.Event.String)
+			wait_classes += "\n" + r.Wait_class.String
+		}
+	}
+	if len(events) > 0 {
+		events = events[1:]
+	}
+	if len(wait_classes) > 0 {
+		wait_classes = wait_classes[1:]
+	}
+	return events, wait_classes
+}
+
+type SqltextRow struct {
+	Sql_id  string `db:"SQL_ID"`
+	Plan    string `db:"PLAN_HASH_VALUE"`
+	Sqltext string `db:"SQL_TEXT"`
+}
+
+func getSqls(db *sqlx.DB, sql_ids []SqlidRow) (string, string, string) {
+	var r SqltextRow
+	sqlids := ""
+	plans := ""
+	sqltexts := ""
+	for _, sqlid := range sql_ids {
+		if !sqlid.Sql_id.Valid {
+			continue
+		}
+		row := db.QueryRowx("select sql_id, plan_hash_value, sql_text\nfrom gv$sql\nwhere sql_id = :1 and child_number= :2", sqlid.Sql_id.String, sqlid.Sql_child_number.Int64)
+		row.StructScan(&r)
+		sqlids += fmt.Sprintf("\n%-6s\n", r.Sql_id)
+		plans += fmt.Sprintf("\n%-8s\n", r.Plan)
+		if len(r.Sqltext) > 152 {
+			r.Sqltext = r.Sqltext[:151]
+		}
+		sqltexts += fmt.Sprintf("\n%152s", r.Sqltext)
+	}
+	if len(sqlids) > 0 {
+		return sqlids[1:], plans[1:], sqltexts[1:]
+	} else {
+		return "", "", ""
+	}
+}
+
+func db_get_stats(db *sqlx.DB) (map[string]int, error) {
+	var res = make(map[string]int)
+	rows, err := db.Query(`
+select sn.name, ss.value
+from   v$statname sn, v$sysstat  ss
+where  sn.statistic# = ss.statistic#
+and ss.name in ('execute count', 'parse count (hard)', 'parse count (total)',
+                'physical read total IO requests', 'physical read total bytes',
+				'physical write total IO requests', 'physical write total bytes',
+				'redo size', 'redo writes', 'session cursor cache hits',
+				'session logical reads', 'user calls', 'user commits')
+union all
+select 'timer', hsecs from v$timer
+`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var (
+			nam string
+			val int
+		)
+		err = rows.Scan(&nam, &val)
+		if err != nil {
+			return nil, err
+		}
+		res[nam] = val
+		//fmt.Println(typ, " ", nam, " ", val)
+	}
+	return res, nil
 }
