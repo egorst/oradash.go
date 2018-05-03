@@ -11,6 +11,7 @@ import (
 
 	ui "github.com/gizak/termui"
 	"github.com/jmoiron/sqlx"
+	termbox "github.com/nsf/termbox-go"
 	_ "gopkg.in/goracle.v2"
 )
 
@@ -50,6 +51,8 @@ type SessionRecord struct {
 
 var stat1, stat2 map[string]int64
 
+var borderLabelFg = c216(0xee, 0xbb, 0x44)
+
 func main() {
 
 	flag.Parse()
@@ -75,6 +78,7 @@ func main() {
 	//ashpoll(db)
 
 	err = ui.Init()
+	termbox.SetOutputMode(termbox.Output256)
 	if err != nil {
 		panic(err)
 	}
@@ -84,6 +88,7 @@ func main() {
 
 	instSum := ui.NewTable()
 	instSum.BorderLabel = " INSTANCE SUMMARY "
+	instSum.BorderLabelFg = borderLabelFg
 	instSum.Separator = false
 	instSum.Height = 5
 	instSum.Width = 111
@@ -125,6 +130,7 @@ func main() {
 	topSqlId.X = 0
 	topSqlId.Y = 5
 	topSqlId.BorderLabel = " TOP SQL_ID (child#) "
+	topSqlId.BorderLabelFg = borderLabelFg
 
 	topSess := ui.NewPar("")
 	topSess.Height = 5
@@ -132,6 +138,7 @@ func main() {
 	topSess.X = 30
 	topSess.Y = 5
 	topSess.BorderLabel = " TOP SESSIONS "
+	topSess.BorderLabelFg = borderLabelFg
 
 	topWaits := ui.NewPar("")
 	topWaits.Height = 5
@@ -139,6 +146,7 @@ func main() {
 	topWaits.X = 52
 	topWaits.Y = 5
 	topWaits.BorderLabel = " TOP WAITS "
+	topWaits.BorderLabelFg = borderLabelFg
 
 	waitClass := ui.NewPar("")
 	waitClass.Height = 5
@@ -146,6 +154,7 @@ func main() {
 	waitClass.X = 94
 	waitClass.Y = 5
 	waitClass.BorderLabel = " WAIT CLASS "
+	waitClass.BorderLabelFg = borderLabelFg
 
 	sqlId := ui.NewPar("")
 	sqlId.Height = 10
@@ -153,6 +162,7 @@ func main() {
 	sqlId.X = 0
 	sqlId.Y = 10
 	sqlId.BorderLabel = " SQL_ID "
+	sqlId.BorderLabelFg = borderLabelFg
 
 	planHashValue := ui.NewPar("")
 	planHashValue.Height = 10
@@ -160,6 +170,7 @@ func main() {
 	planHashValue.X = 15
 	planHashValue.Y = 10
 	planHashValue.BorderLabel = " PLAN_HASH_VALUE"
+	planHashValue.BorderLabelFg = borderLabelFg
 
 	sqlText := ui.NewPar("")
 	sqlText.Height = 10
@@ -167,6 +178,7 @@ func main() {
 	sqlText.X = 33
 	sqlText.Y = 10
 	sqlText.BorderLabel = " SQL_TEXT "
+	sqlText.BorderLabelFg = borderLabelFg
 
 	sqlids := ashTopSqlids(db)
 	sqlidtext := ""
@@ -480,4 +492,24 @@ select 'timer', hsecs from v$timer
 		res[nam] = val
 	}
 	return res, nil
+}
+
+func conv216(i int) int {
+	cnt := 0
+	for {
+		if i <= 0 {
+			return cnt
+		} else if i <= 95 {
+			i -= 95
+			cnt += 1
+		} else {
+			i -= 40
+			cnt += 1
+		}
+	}
+	return cnt
+}
+
+func c216(r, g, b int) ui.Attribute {
+	return (ui.Attribute)(16 + conv216(r)*36 + conv216(g)*6 + conv216(b) + 1) // +1 is a temporary dirty hack
 }
