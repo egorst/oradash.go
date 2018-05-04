@@ -449,8 +449,9 @@ func getSqls(db *sqlx.DB, sql_ids []SqlidRow) (string, string, string) {
 			row.StructScan(&r)
 			sqlids += fmt.Sprintf("\n%-6s\n", r.Sql_id)
 			plans += fmt.Sprintf("\n%-8d\n", r.Plan.Int64)
-			if len(r.Sqltext) > 152 {
-				r.Sqltext = r.Sqltext[:151]
+			r.Sqltext = trimsql(r.Sqltext)
+			if len(r.Sqltext) > 153 {
+				r.Sqltext = r.Sqltext[:152]
 			}
 			sqltexts += fmt.Sprintf("\n%-152s", strings.TrimSpace(r.Sqltext))
 		}
@@ -492,6 +493,29 @@ select 'timer', hsecs from v$timer
 		res[nam] = val
 	}
 	return res, nil
+}
+
+func trimsql(s string) string {
+	res := ""
+	instr := false
+	prevspace := false
+	for _, c := range strings.Split(s, "") {
+		if c == "'" {
+			instr = !instr
+		}
+		if !instr {
+			if c == " " {
+				if prevspace {
+					continue
+				}
+				prevspace = true
+			} else {
+				prevspace = false
+			}
+		}
+		res += c
+	}
+	return res
 }
 
 func conv216(i int) int {
