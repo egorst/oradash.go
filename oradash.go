@@ -52,10 +52,21 @@ type SessionRecord struct {
 var stat1, stat2 map[string]int64
 
 var borderLabelFg = c216(0xee, 0xbb, 0x44)
+var sysStatementFg = c216(8, 8, 8)
 
 func main() {
 
 	flag.Parse()
+
+	/*
+		lf, err := os.OpenFile("oradash.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			panic(err)
+		}
+		defer lf.Close()
+		logger := log.New(lf, "", log.Ltime)
+		logger.Printf("starting oradash\n")
+	*/
 
 	if len(os.Args) < 2 {
 		fmt.Println("Usage:\n$ " + os.Args[0] + " <connect_string>")
@@ -71,8 +82,7 @@ func main() {
 
 	stat2, err = db_get_stats(db)
 	if err != nil {
-		fmt.Println("ERR:", err)
-		return
+		panic(err)
 	}
 
 	//ashpoll(db)
@@ -193,10 +203,20 @@ func main() {
 		topSqlId.Text = ""
 	}
 
-	sql_ids, plans, sqltexts := getSqls(db, sqlids)
-	sqlId.Text = sql_ids
-	planHashValue.Text = plans
-	sqlText.Text = sqltexts
+	sqls := getSqls(db, sqlids)
+	if len(sqls) > 0 {
+		sqlId.Text = ""
+		planHashValue.Text = ""
+		sqlText.Text = ""
+		for _, s := range sqls[0 : len(sqls)-1] {
+			sqlId.Text += s.sqlid + "\n\n"
+			planHashValue.Text += s.plan + "\n\n"
+			sqlText.Text += s.sqltext + "\n"
+		}
+		sqlId.Text += sqls[len(sqls)-1].sqlid
+		planHashValue.Text += sqls[len(sqls)-1].plan
+		sqlText.Text += sqls[len(sqls)-1].sqltext
+	}
 
 	sids := ashTopSids(db)
 	topSess.Text = sids
@@ -254,10 +274,24 @@ func main() {
 			topSqlId.Text = ""
 		}
 
-		sql_ids, plans, sqltexts := getSqls(db, sqlids)
-		sqlId.Text = sql_ids
-		planHashValue.Text = plans
-		sqlText.Text = sqltexts
+		sqls := getSqls(db, sqlids)
+		if len(sqls) > 0 {
+			sqlId.Text = ""
+			planHashValue.Text = ""
+			sqlText.Text = ""
+			for _, s := range sqls[0 : len(sqls)-1] {
+				sqlId.Text += s.sqlid + "\n\n"
+				planHashValue.Text += s.plan + "\n\n"
+				sqlText.Text += s.sqltext + "\n"
+			}
+			sqlId.Text += sqls[len(sqls)-1].sqlid
+			planHashValue.Text += sqls[len(sqls)-1].plan
+			sqlText.Text += sqls[len(sqls)-1].sqltext
+		}
+
+		//sqlId.Text = sql_ids
+		//planHashValue.Text = plans
+		//sqlText.Text = sqltexts
 
 		sids := ashTopSids(db)
 		topSess.Text = sids
@@ -433,34 +467,45 @@ where rownum < 4`)
 }
 
 type SqltextRow struct {
-	Sql_id  string        `db:"SQL_ID"`
-	Plan    sql.NullInt64 `db:"PLAN_HASH_VALUE"`
-	Sqltext string        `db:"SQL_TEXT"`
+	Sql_id          string        `db:"SQL_ID"`
+	Plan            sql.NullInt64 `db:"PLAN_HASH_VALUE"`
+	Sqltext         string        `db:"SQL_TEXT"`
+	Parsing_User_Id sql.NullInt64 `db:"PARSING_USER_ID"`
 }
 
-func getSqls(db *sqlx.DB, sql_ids []SqlidRow) (string, string, string) {
+type SqlStmt struct {
+	sqlid   string
+	plan    string
+	sqltext string
+	userid  int64
+}
+
+func getSqls(db *sqlx.DB, sql_ids []SqlidRow) []SqlStmt {
 	var r SqltextRow
-	sqlids := ""
-	plans := ""
-	sqltexts := ""
+	var s SqlStmt
+	sqls := make([]SqlStmt, 0)
 	for _, sqlid := range sql_ids {
 		if sqlid.Sql_id.Valid {
-			row := db.QueryRowx("select distinct sql_id, plan_hash_value, sql_text\nfrom gv$sql\nwhere sql_id = :1 and child_number= :2", sqlid.Sql_id.String, sqlid.Sql_child_number.Int64)
+			row := db.QueryRowx("select distinct sql_id, plan_hash_value, sql_text, parsing_user_id\nfrom gv$sql\nwhere sql_id = :1 and child_number= :2", sqlid.Sql_id.String, sqlid.Sql_child_number.Int64)
 			row.StructScan(&r)
-			sqlids += fmt.Sprintf("\n%-6s\n", r.Sql_id)
-			plans += fmt.Sprintf("\n%-8d\n", r.Plan.Int64)
+
+			s.sqlid = fmt.Sprintf("%-6s", r.Sql_id)
+			s.plan = fmt.Sprintf("%-8d", r.Plan.Int64)
 			r.Sqltext = trimsql(r.Sqltext)
 			if len(r.Sqltext) > 153 {
-				r.Sqltext = r.Sqltext[:152]
+				r.Sqltext = r.Sqltext[:153]
 			}
-			sqltexts += fmt.Sprintf("\n%-152s", strings.TrimSpace(r.Sqltext))
+
+			if r.Parsing_User_Id.Valid {
+				s.userid = r.Parsing_User_Id.Int64
+			} else {
+				s.userid = -1
+			}
+			s.sqltext = fmt.Sprintf("%-152s", strings.TrimSpace(r.Sqltext))
+			sqls = append(sqls, s)
 		}
 	}
-	if len(sqlids) > 0 {
-		return sqlids[1:], plans[1:], sqltexts[1:]
-	} else {
-		return "", "", ""
-	}
+	return sqls
 }
 
 func db_get_stats(db *sqlx.DB) (map[string]int64, error) {
@@ -535,5 +580,9 @@ func conv216(i int) int {
 }
 
 func c216(r, g, b int) ui.Attribute {
-	return (ui.Attribute)(16 + conv216(r)*36 + conv216(g)*6 + conv216(b) + 1) // +1 is a temporary dirty hack
+	if r == g && g == b && r != 0 && r != 255 {
+		return (ui.Attribute)(16 + 216 + r)
+	} else {
+		return (ui.Attribute)(16 + conv216(r)*36 + conv216(g)*6 + conv216(b) + 1) // +1 is a temporary dirty hack
+	}
 }
