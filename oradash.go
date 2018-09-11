@@ -6,12 +6,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
-	ui "github.com/gizak/termui"
 	"github.com/jmoiron/sqlx"
-	termbox "github.com/nsf/termbox-go"
 	_ "gopkg.in/goracle.v2"
 )
 
@@ -33,6 +32,24 @@ type instanceSummary struct {
 	redomb   float32
 }
 
+type instanceMetrics struct {
+	iname string
+	mtime string
+	//
+	cpuutil  float32 // Host CPU Utilization (%)
+	cpuratio float32 // Database CPU Time Ratio
+	aas      float32 // Average Active Sessions
+	execs    float32 // Executions Per Sec
+	calls    float32 // User Calls Per Sec
+	tnxs     float32 // User Transaction Per Sec
+	lios     float32 // Logical Reads Per Sec
+	phyrd    float32 // Physical Reads Per Sec
+	phywr    float32 // Physical Writes Per Sec
+	blkgets  float32 // DB Block Gets Per Sec
+	blkchng  float32 // DB Block Changes Per Sec
+	redomb   float32 // Redo Generated Per Sec
+}
+
 type SessionRecord struct {
 	Ashtime          int            `db:"ASHTIME"`
 	Sid              int            `db:"SID"`
@@ -49,12 +66,109 @@ type SessionRecord struct {
 	Seconds_in_wait  sql.NullString `db:"SECONDS_IN_WAIT"`
 }
 
-var stat1, stat2 map[string]int64
+type F struct {
+	x int
+	y int
+	w int
+	h int
+}
 
-var borderLabelFg = c216(0xee, 0xbb, 0x44)
-var sysStatementFg = c216(8, 8, 8)
+var stat1, stat2 map[string]int64
+var Cls = "\x1b[2J"
+
+func xy(x int, y int) string {
+	return fmt.Sprintf("\x1b[%d;%dH", y, x)
+}
+
+func fg(c int) string {
+	return fmt.Sprintf("\x1b[38;5;%dm", c)
+}
+
+func bg(c int) string {
+	return fmt.Sprintf("\x1b[48;5;%dm", c)
+}
+
+func puts(s string, x int, y int, f int, b int) {
+	fmt.Print(xy(x, y))
+	fmt.Print(fg(f), bg(b))
+	fmt.Print(s)
+}
+
+//var borderLabelFg = c216(0xee, 0xbb, 0x44)
+//var sysStatementFg = c216(8, 8, 8)
+
+func printTemplate(S map[string]F) {
+
+	//	tmplt := "┌ \x1b[38;5;230mINSTANCE SUMMARY\x1b[38;5;252m ───────────────────────────────────────────────────────────────────────────────────────────┐\n" +
+	//		"│  Instance:                │ Execs/s:          │ sParse/s:         │ LIOs/s:          │ Read MB/s:           │\n" +
+	//		"│  Cur Time:                │ Calls/s:          │ hParse/s:         │ PhyRD/s:         │ Writ MB/s:           │\n" +
+	//		"│  Sessions a/b:            │ Commits:          │ ccHits/s:         │ PhyWR/s:         │ Redo MB/s:           │\n" +
+	//		"└─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\n" +
+	tmplt := "┌ \x1b[38;5;230mINSTANCE METRICS\x1b[38;5;252m ────────────────────────────────────────────────────────────────────────┐\n" +
+		"│ CPU Util:                 │ Execs/s:          │ LRDs/s:          │ Blk Gets/s:           │\n" +
+		"│ DB CPU Time Ratio:        │ Calls/s:          │ PhyRD/s:         │ Blk Chng/s:           │\n" +
+		"│ AvgActive Sessions:       │ Tnxs/s:           │ PhyWR/s:         │ Redo MB/s:            │\n" +
+		"└──────────────────────────────────────────────────────────────────────────────────────────┘\n" +
+		"┌ \x1b[38;5;230mTOP SQL_ID (child#)\x1b[38;5;252m ────────┬ \x1b[38;5;230mTOP SESSIONS\x1b[38;5;252m ──────┬┬ \x1b[38;5;230mTOP WAITS\x1b[38;5;252m ──────────────────────────────┬ \x1b[38;5;230mWAIT CLASS\x1b[38;5;252m ───┐\n" +
+		"│                             │                    ││                                         │               │\n" +
+		"│                             │                    ││                                         │               │\n" +
+		"│                             │                    ││                                         │               │\n" +
+		"│                             │                    ││                                         │               │\n" +
+		"│                             │                    ││                                         │               │\n" +
+		"└─────────────────────────────┴────────────────────┘└─────────────────────────────────────────┴───────────────┘\n" +
+		"┌ \x1b[38;5;230mSQL_ID\x1b[38;5;252m ──────┬ \x1b[38;5;230mPLAN_HASH_VALUE\x1b[38;5;252m ┬ \x1b[38;5;230mSQL_TEXT\x1b[38;5;252m ──────────────────────────────────────────────────────────────────┐\n" +
+		"│              │                 │                                                                            │\n" +
+		"│              │                 │                                                                            │\n" +
+		"│              │                 │                                                                            │\n" +
+		"│              │                 │                                                                            │\n" +
+		"│              │                 │                                                                            │\n" +
+		"│              │                 │                                                                            │\n" +
+		"│              │                 │                                                                            │\n" +
+		"│              │                 │                                                                            │\n" +
+		"└──────────────┴─────────────────┴────────────────────────────────────────────────────────────────────────────┘\n"
+	fmt.Print(Cls, xy(0, 0), fg(252), bg(235)) // c216(0xff, 0xff, 0xaf)), bg(234))
+	for _, l := range strings.Split(tmplt, "\n") {
+		fmt.Println(l)
+	}
+	fmt.Print(xy(1, 23))
+}
+
+func printF(S map[string]F, fn string, v string) {
+	if f, ok := S[fn]; ok {
+		fmt.Print(xy(f.x+f.w-len(v), f.y), v)
+	}
+}
+
+/*
+func curset(i byte) error {
+	if C.curs_set(C.int(i)) == C.ERR {
+		return errors.New("Failed to set")
+	}
+	return nil
+}
+*/
 
 func main() {
+	S := make(map[string]F)
+	S["cpuutil"] = F{13, 2, 15, 1}
+	S["cpuratio"] = F{13, 3, 15, 1}
+	S["aas"] = F{23, 4, 5, 1}
+	S["execs"] = F{39, 2, 9, 1}
+	S["calls"] = F{39, 3, 9, 1}
+	S["tnxs"] = F{39, 4, 9, 1}
+	S["lios"] = F{59, 2, 8, 1}
+	S["phyrd"] = F{60, 3, 7, 1}
+	S["phywr"] = F{60, 4, 7, 1}
+	//S["lios"] = F{78, 2, 8, 1}
+	//S["phyrd"] = F{78, 3, 7, 1}
+	//S["phywr"] = F{78, 4, 7, 1}
+	S["blkgets"] = F{79, 2, 12, 1}
+	S["blkchng"] = F{79, 3, 12, 1}
+	S["redomb"] = F{78, 4, 13, 1}
+	S["topsqlids"] = F{4, 7, 24, 5}
+	S["topsids"] = F{33, 7, 18, 5}
+	S["events"] = F{60, 7, 32, 5}
+	S["waitclasses"] = F{97, 7, 14, 5}
 
 	flag.Parse()
 
@@ -80,229 +194,173 @@ func main() {
 	}
 	defer db.Close()
 
-	stat2, err = db_get_stats(db)
+	/*
+		_, err = db_get_stats(db)
+		if err != nil {
+			panic(err)
+		}
+	*/
+
+	exec.Command("stty", "-F", "/dev/tty", "cbreak", "min", "1").Run()
+	// do not display entered characters on the screen
+	exec.Command("stty", "-F", "/dev/tty", "-echo").Run()
+	// restore the echoing state when exiting
+	defer func() {
+		exec.Command("stty", "-F", "/dev/tty", "-cbreak").Run()
+		exec.Command("stty", "-F", "/dev/tty", "echo").Run()
+		fmt.Print("\x1b[?25h") // show cursor
+	}()
+
+	// first run
+	im, err := getMetrics(db)
 	if err != nil {
 		panic(err)
+	}
+
+	printTemplate(S)
+	displayMetrics(im, S)
+
+	sqlidrows, err := ashTopSqlids(db)
+	if err != nil {
+		panic(err)
+	}
+	printTopSqlids(sqlidrows, S)
+
+	sids, err := ashTopSids(db)
+	if err != nil {
+		panic(err)
+	}
+	printTopSids(sids, S)
+
+	events, err := ashTopEvents(db)
+	if err != nil {
+		panic(err)
+	}
+	printTopEvents(events, S)
+
+	var b []byte = make([]byte, 1)
+
+	quit := make(chan struct{})
+	go func() {
+		for {
+			os.Stdin.Read(b)
+			if b[0] == 0x1b {
+				close(quit)
+			}
+			//fmt.Println("I got the byte", b, "("+string(b)+")")
+		}
+	}()
+
+	//var cnt = 0
+
+	fmt.Print(xy(0, 23))
+	fmt.Print("\x1b[?25l") // turn off cursor
+
+loop:
+	for {
+		select {
+		case <-quit:
+			break loop
+		case <-time.After(time.Millisecond * 10000):
+			im, err := getMetrics(db)
+			if err != nil {
+				panic(err)
+			}
+			displayMetrics(im, S)
+
+			sqlidrows, err := ashTopSqlids(db)
+			if err != nil {
+				panic(err)
+			}
+			printTopSqlids(sqlidrows, S)
+
+			sids, err := ashTopSids(db)
+			if err != nil {
+				panic(err)
+			}
+			printTopSids(sids, S)
+
+			events, err := ashTopEvents(db)
+			if err != nil {
+				panic(err)
+			}
+			printTopEvents(events, S)
+
+			fmt.Print(xy(0, 23))
+			fmt.Print("\x1b[?25l") // turn off cursor
+		}
 	}
 
 	//ashpoll(db)
 
-	err = ui.Init()
-	termbox.SetOutputMode(termbox.Output256)
+	//is := getInstanceSummary(db)
+
+	//sids := ashTopSids(db)
+
+	//events, wait_classes := ashTopEvents(db)
+
+}
+
+func printTopSqlids(sqlidrows []SqlidRow, S map[string]F) {
+	if len(sqlidrows) > 0 {
+		sF, _ := S["topsqlids"]
+		for i, sqlid := range sqlidrows {
+			val := fmt.Sprintf("%3d%% | %18s", sqlid.Seconds*100/300, fmt.Sprintf("%s (%d)", sqlid.Sql_id.String, sqlid.Sql_child_number.Int64))
+			fmt.Print(xy(sF.x+sF.w-len(val), sF.y+i), val)
+		}
+	}
+}
+
+func printTopSids(sids []SessionRow, S map[string]F) {
+	if len(sids) > 0 {
+		sF, _ := S["topsids"]
+		for i, sid := range sids {
+			val := fmt.Sprintf("%3d%% | %11s", sid.Seconds*100/300, fmt.Sprintf("%s,%s", sid.Sid.String, sid.Serial.String))
+			fmt.Print(xy(sF.x+sF.w-len(val), sF.y+i), val)
+		}
+	}
+}
+
+func printTopEvents(events []EventRow, S map[string]F) {
+	if len(events) > 0 {
+		F1, _ := S["events"]
+		F2, _ := S["waitclasses"]
+		for i, ev := range events {
+			val1 := fmt.Sprintf("%3d%% | %-30s", ev.Seconds*100/300, ev.Event.String)
+			val2 := fmt.Sprintf("%-14s", ev.Wait_class.String)
+			fmt.Print(xy(F1.x+F1.w-len(val1), F1.y+i), val1)
+			fmt.Print(xy(F2.x+F2.w-len(val2), F2.y+i), val2)
+		}
+	}
+}
+
+func displayMetrics(im instanceMetrics, S map[string]F) {
+	fmt.Print(xy(20, 1), fg(230), "[ ", im.iname, " ", im.mtime, " ] ", fg(252)) // c216(0xff, 0xff, 0xaf)), bg(234))
+	printF(S, "cpuutil", fmt.Sprintf("%3.0f%%", im.cpuutil))
+	printF(S, "cpuratio", fmt.Sprintf("%3.0f%%", im.cpuratio))
+	printF(S, "aas", fmt.Sprintf("%5.1f", im.aas))
+	printF(S, "execs", fmt.Sprintf("%9.0f", im.execs))
+	printF(S, "calls", fmt.Sprintf("%9.0f", im.calls))
+	printF(S, "tnxs", fmt.Sprintf("%9.0f", im.tnxs))
+	printF(S, "lios", fmt.Sprintf("%7.0f", im.lios))
+	printF(S, "phyrd", fmt.Sprintf("%7.0f", im.phyrd))
+	printF(S, "phywr", fmt.Sprintf("%7.0f", im.phywr))
+	printF(S, "blkgets", fmt.Sprintf("%7.0f", im.blkgets))
+	printF(S, "blkchng", fmt.Sprintf("%7.0f", im.blkchng))
+	printF(S, "redomb", fmt.Sprintf("%7.0f", im.redomb/1024/1024))
+}
+
+func logerr(e string) {
+	f, err := os.OpenFile("odash.log", os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		panic(err)
 	}
-	defer ui.Close()
 
-	is := getInstanceSummary(db)
+	defer f.Close()
 
-	instSum := ui.NewTable()
-	instSum.BorderLabel = " INSTANCE SUMMARY "
-	instSum.BorderLabelFg = borderLabelFg
-	instSum.Separator = false
-	instSum.Height = 5
-	instSum.Width = 111
-	//instSum.CellWidth = []int{24, 17, 17, 16, 19} // 110
-	instSum.X = 0
-	instSum.Y = 0
-	//instSum.SetSize()
-	instSum.Rows = [][]string{
-		/*return fmt.Sprintf(" Instance: %-14s  | Execs/s: %8.1f | sParse/s: %7.1f | LIOs/s: %8.1f | Read MB/s: %8.1f\n", is.iname, is.execs, is.sparse, is.lios, is.readmb) +
-		fmt.Sprintf(" Cur Time: %-14s | Calls/s: %8.1f | hParse/s: %7.1f | PhyRD/s: %7.1f | Writ MB/s: %8.1f\n", ctime, is.calls, is.hparse, is.phyrd, is.writemb) +
-		fmt.Sprintf(" History: %-16s | Commits: %8.1f | ccHits/s: %7.1f | PhyWR/s: %7.1f | Redo MB/s: %8.1f", "", is.commits, is.cchits, is.phywr, is.redomb) */
-		[]string{
-			fmt.Sprintf("Instance: %14s", is.iname),
-			fmt.Sprintf("Execs/s: %8.1f", is.execs),
-			fmt.Sprintf("sParse/s: %7.1f", is.sparse),
-			fmt.Sprintf("LIOs/s: %8.1f", is.lios),
-			fmt.Sprintf("Read MB/s: %8.1f", is.readmb),
-		},
-		[]string{
-			fmt.Sprintf("Cur Time: %14s", is.ctime),
-			fmt.Sprintf("Calls/s: %8.1f", is.calls),
-			fmt.Sprintf("hParse/s: %7.1f", is.hparse),
-			fmt.Sprintf("PhyRD/s: %7.1f", is.phyrd),
-			fmt.Sprintf("Writ MB/s: %8.1f", is.writemb),
-		},
-		[]string{
-			fmt.Sprintf("Sessions a/b: %10s", is.sessions),
-			fmt.Sprintf("Commits: %8.1f", is.commits),
-			fmt.Sprintf("ccHits/s: %7.1f", is.cchits),
-			fmt.Sprintf("PhyWR/s: %7.1f", is.phywr),
-			fmt.Sprintf("Redo MB/s: %8.1f", is.redomb),
-		},
+	if _, err = f.WriteString(e + "\n"); err != nil {
+		panic(err)
 	}
-	ui.Render(instSum)
-
-	topSqlId := ui.NewPar("")
-	topSqlId.Height = 5
-	topSqlId.Width = 31
-	topSqlId.X = 0
-	topSqlId.Y = 5
-	topSqlId.BorderLabel = " TOP SQL_ID (child#) "
-	topSqlId.BorderLabelFg = borderLabelFg
-
-	topSess := ui.NewPar("")
-	topSess.Height = 5
-	topSess.Width = 22
-	topSess.X = 30
-	topSess.Y = 5
-	topSess.BorderLabel = " TOP SESSIONS "
-	topSess.BorderLabelFg = borderLabelFg
-
-	topWaits := ui.NewPar("")
-	topWaits.Height = 5
-	topWaits.Width = 43
-	topWaits.X = 52
-	topWaits.Y = 5
-	topWaits.BorderLabel = " TOP WAITS "
-	topWaits.BorderLabelFg = borderLabelFg
-
-	waitClass := ui.NewPar("")
-	waitClass.Height = 5
-	waitClass.Width = 17
-	waitClass.X = 94
-	waitClass.Y = 5
-	waitClass.BorderLabel = " WAIT CLASS "
-	waitClass.BorderLabelFg = borderLabelFg
-
-	sqlId := ui.NewPar("")
-	sqlId.Height = 10
-	sqlId.Width = 16
-	sqlId.X = 0
-	sqlId.Y = 10
-	sqlId.BorderLabel = " SQL_ID "
-	sqlId.BorderLabelFg = borderLabelFg
-
-	planHashValue := ui.NewPar("")
-	planHashValue.Height = 10
-	planHashValue.Width = 19
-	planHashValue.X = 15
-	planHashValue.Y = 10
-	planHashValue.BorderLabel = " PLAN_HASH_VALUE"
-	planHashValue.BorderLabelFg = borderLabelFg
-
-	sqlText := ui.NewPar("")
-	sqlText.Height = 10
-	sqlText.Width = 78
-	sqlText.X = 33
-	sqlText.Y = 10
-	sqlText.BorderLabel = " SQL_TEXT "
-	sqlText.BorderLabelFg = borderLabelFg
-
-	sqlids := ashTopSqlids(db)
-	sqlidtext := ""
-	for _, s := range sqlids {
-		if s.Sql_id.Valid {
-			sqlidtext += fmt.Sprintf("\n %3d%% | %10s (%d)", s.Seconds*100/(5*60), s.Sql_id.String, s.Sql_child_number.Int64)
-		}
-	}
-	if len(sqlidtext) > 0 {
-		topSqlId.Text = sqlidtext[1:]
-	} else {
-		topSqlId.Text = ""
-	}
-
-	sqls := getSqls(db, sqlids)
-	if len(sqls) > 0 {
-		sqlId.Text = ""
-		planHashValue.Text = ""
-		sqlText.Text = ""
-		for _, s := range sqls[0 : len(sqls)-1] {
-			sqlId.Text += s.sqlid + "\n\n"
-			planHashValue.Text += s.plan + "\n\n"
-			sqlText.Text += s.sqltext + "\n"
-		}
-		sqlId.Text += sqls[len(sqls)-1].sqlid
-		planHashValue.Text += sqls[len(sqls)-1].plan
-		sqlText.Text += sqls[len(sqls)-1].sqltext
-	}
-
-	sids := ashTopSids(db)
-	topSess.Text = sids
-
-	events, wait_classes := ashTopEvents(db)
-	topWaits.Text = events
-	waitClass.Text = wait_classes
-
-	ui.Render(instSum, topSqlId, topSess, topWaits, waitClass, sqlId, planHashValue, sqlText)
-
-	ui.Handle("/sys/kbd/q", func(e ui.Event) {
-		ui.StopLoop()
-	})
-
-	instSum.Handle("/timer/1s", func(e ui.Event) {
-		t := e.Data.(ui.EvtTimer)
-		if t.Count%5 != 0 {
-			return
-		}
-		is = getInstanceSummary(db)
-		instSum.Rows = [][]string{
-			/*return fmt.Sprintf(" Instance: %-14s  | Execs/s: %8.1f | sParse/s: %7.1f | LIOs/s: %8.1f | Read MB/s: %8.1f\n", is.iname, is.execs, is.sparse, is.lios, is.readmb) +
-			fmt.Sprintf(" Cur Time: %-14s | Calls/s: %8.1f | hParse/s: %7.1f | PhyRD/s: %7.1f | Writ MB/s: %8.1f\n", ctime, is.calls, is.hparse, is.phyrd, is.writemb) +
-			fmt.Sprintf(" History: %-16s | Commits: %8.1f | ccHits/s: %7.1f | PhyWR/s: %7.1f | Redo MB/s: %8.1f", "", is.commits, is.cchits, is.phywr, is.redomb) */
-			[]string{
-				fmt.Sprintf("Instance: %14s", is.iname),
-				fmt.Sprintf("Execs/s: %8.1f", is.execs),
-				fmt.Sprintf("sParse/s: %7.1f", is.sparse),
-				fmt.Sprintf("LIOs/s: %8.1f", is.lios),
-				fmt.Sprintf("Read MB/s: %8.1f", is.readmb),
-			},
-			[]string{
-				fmt.Sprintf("Cur Time: %14s", is.ctime),
-				fmt.Sprintf("Calls/s: %8.1f", is.calls),
-				fmt.Sprintf("hParse/s: %7.1f", is.hparse),
-				fmt.Sprintf("PhyRD/s: %7.1f", is.phyrd),
-				fmt.Sprintf("Writ MB/s: %8.1f", is.writemb),
-			},
-			[]string{
-				fmt.Sprintf("Sessions a/b: %10s", is.sessions),
-				fmt.Sprintf("Commits: %8.1f", is.commits),
-				fmt.Sprintf("ccHits/s: %7.1f", is.cchits),
-				fmt.Sprintf("PhyWR/s: %7.1f", is.phywr),
-				fmt.Sprintf("Redo MB/s: %8.1f", is.redomb),
-			},
-		}
-		sqlids := ashTopSqlids(db)
-		sqlidtext := ""
-		for _, s := range sqlids {
-			sqlidtext += fmt.Sprintf("\n %3d%% | %10s (%d)", s.Seconds*100/(5*60), s.Sql_id.String, s.Sql_child_number.Int64)
-		}
-		if len(sqlidtext) > 0 {
-			topSqlId.Text = sqlidtext[1:]
-		} else {
-			topSqlId.Text = ""
-		}
-
-		sqls := getSqls(db, sqlids)
-		if len(sqls) > 0 {
-			sqlId.Text = ""
-			planHashValue.Text = ""
-			sqlText.Text = ""
-			for _, s := range sqls[0 : len(sqls)-1] {
-				sqlId.Text += s.sqlid + "\n\n"
-				planHashValue.Text += s.plan + "\n\n"
-				sqlText.Text += s.sqltext + "\n"
-			}
-			sqlId.Text += sqls[len(sqls)-1].sqlid
-			planHashValue.Text += sqls[len(sqls)-1].plan
-			sqlText.Text += sqls[len(sqls)-1].sqltext
-		}
-
-		//sqlId.Text = sql_ids
-		//planHashValue.Text = plans
-		//sqlText.Text = sqltexts
-
-		sids := ashTopSids(db)
-		topSess.Text = sids
-
-		events, wait_classes := ashTopEvents(db)
-		topWaits.Text = events
-		waitClass.Text = wait_classes
-		ui.Render(instSum, topSqlId, topSess, topWaits, waitClass, sqlId, planHashValue, sqlText)
-	})
-
-	ui.Loop()
 }
 
 func getInstanceSummary(db *sqlx.DB) instanceSummary {
@@ -381,17 +439,17 @@ type SqlidRow struct {
 	Seconds          int            `db:"SECONDS"`
 }
 
-func ashTopSqlids(db *sqlx.DB) []SqlidRow {
+func ashTopSqlids(db *sqlx.DB) ([]SqlidRow, error) {
 	var sqlidRows []SqlidRow
 	var r SqlidRow
 	rows, err := db.Queryx(`select * from 
 	(select sql_id, sql_child_number, count(*) seconds 
-	 from gv$active_session_history 
+	 from v$active_session_history 
 	 where sample_time >= sysdate-5/1440 group by sql_id,sql_child_number order by 3 desc
 	)
-	where rownum < 4`)
+	where rownum < 6`)
 	if err != nil {
-		log.Println(err)
+		return sqlidRows, err
 	}
 	for rows.Next() {
 		rows.StructScan(&r)
@@ -399,7 +457,7 @@ func ashTopSqlids(db *sqlx.DB) []SqlidRow {
 			sqlidRows = append(sqlidRows, r)
 		}
 	}
-	return sqlidRows
+	return sqlidRows, nil
 }
 
 type SessionRow struct {
@@ -408,26 +466,25 @@ type SessionRow struct {
 	Seconds int            `db:"SECONDS"`
 }
 
-func ashTopSids(db *sqlx.DB) string {
+func ashTopSids(db *sqlx.DB) ([]SessionRow, error) {
+	var res []SessionRow
 	var r SessionRow
-	res := ""
 	rows, err := db.Queryx(`select * from 
 	(select session_id, session_serial#, count(*) seconds 
-	 from gv$active_session_history 
+	 from v$active_session_history 
 	 where sample_time >= sysdate-5/1440 group by session_id,session_serial# order by 3 desc
 	)
-	where rownum < 4`)
+	where rownum < 6`)
 	if err != nil {
-		log.Println(err)
+		return res, err
 	}
 	for rows.Next() {
 		rows.StructScan(&r)
-		res += fmt.Sprintf("\n %3d%% | %s.%s", r.Seconds*100/(5*60), r.Sid.String, r.Serial.String)
+		if r.Sid.Valid && r.Sid.String != "" {
+			res = append(res, r)
+		}
 	}
-	if len(res) > 0 {
-		res = res[1:]
-	}
-	return res
+	return res, nil
 }
 
 type EventRow struct {
@@ -436,34 +493,26 @@ type EventRow struct {
 	Seconds    int            `db:"SECONDS"`
 }
 
-func ashTopEvents(db *sqlx.DB) (string, string) {
+func ashTopEvents(db *sqlx.DB) ([]EventRow, error) {
+	var res []EventRow
 	var r EventRow
-	events := ""
-	wait_classes := ""
 	rows, err := db.Queryx(`select * from 
 	(select decode(session_state,'ON CPU',session_state,event) event, wait_class , count(*) seconds
-	 from gv$active_session_history
+	 from v$active_session_history
 	 where sample_time >= sysdate-5/1440
 	 group by decode(session_state,'ON CPU',session_state,event), wait_class order by 3 desc
 	)
-where rownum < 4`)
+where rownum < 6`)
 	if err != nil {
-		log.Println(err)
+		return res, err
 	}
 	for rows.Next() {
 		rows.StructScan(&r)
 		if r.Event.Valid {
-			events += fmt.Sprintf("\n %3d%% | %s", r.Seconds*100/(5*60), r.Event.String)
-			wait_classes += "\n" + r.Wait_class.String
+			res = append(res, r)
 		}
 	}
-	if len(events) > 0 {
-		events = events[1:]
-	}
-	if len(wait_classes) > 0 {
-		wait_classes = wait_classes[1:]
-	}
-	return events, wait_classes
+	return res, nil
 }
 
 type SqltextRow struct {
@@ -480,32 +529,83 @@ type SqlStmt struct {
 	userid  int64
 }
 
-func getSqls(db *sqlx.DB, sql_ids []SqlidRow) []SqlStmt {
+func getSqls(db *sqlx.DB, sql_ids []SqlidRow) ([]SqltextRow, error) {
+	var res []SqltextRow
 	var r SqltextRow
-	var s SqlStmt
-	sqls := make([]SqlStmt, 0)
 	for _, sqlid := range sql_ids {
 		if sqlid.Sql_id.Valid {
 			row := db.QueryRowx("select distinct sql_id, plan_hash_value, sql_text, parsing_user_id\nfrom gv$sql\nwhere sql_id = :1 and child_number= :2", sqlid.Sql_id.String, sqlid.Sql_child_number.Int64)
 			row.StructScan(&r)
 
-			s.sqlid = fmt.Sprintf("%-6s", r.Sql_id)
-			s.plan = fmt.Sprintf("%-8d", r.Plan.Int64)
 			r.Sqltext = trimsql(r.Sqltext)
 			if len(r.Sqltext) > 153 {
 				r.Sqltext = r.Sqltext[:153]
 			}
-
-			if r.Parsing_User_Id.Valid {
-				s.userid = r.Parsing_User_Id.Int64
-			} else {
-				s.userid = -1
-			}
-			s.sqltext = fmt.Sprintf("%-152s", strings.TrimSpace(r.Sqltext))
-			sqls = append(sqls, s)
 		}
 	}
-	return sqls
+	return res, nil
+}
+
+func getMetrics(db *sqlx.DB) (instanceMetrics, error) {
+	var im instanceMetrics
+	var iname string
+
+	err := db.Get(&iname, "select instance_name from v$instance")
+	if err != nil {
+		im.iname = "?"
+	} else {
+		im.iname = iname
+	}
+
+	im.mtime = time.Now().Format("15:04:05")
+	rows, err := db.Query(`select metric_name, value
+from v$sysmetric 
+where group_id=3 and metric_name in (
+  'Average Active Sessions', 'Host CPU Utilization (%)', 'Database CPU Time Ratio',
+  'Executions Per Sec', 'User Calls Per Sec', 'User Transaction Per Sec',
+  'Logical Reads Per Sec', 'Physical Reads Per Sec', 'Physical Writes Per Sec',
+  'DB Block Gets Per Sec', 'DB Block Changes Per Sec', 'Redo Generated Per Sec'
+)`)
+	if err != nil {
+		return im, err
+	}
+	for rows.Next() {
+		var (
+			nam string
+			val float32
+		)
+		err = rows.Scan(&nam, &val)
+		if err != nil {
+			return im, err
+		}
+		switch nam {
+		case "Host CPU Utilization (%)":
+			im.cpuutil = val
+		case "Database CPU Time Ratio":
+			im.cpuratio = val
+		case "Average Active Sessions":
+			im.aas = val
+		case "Executions Per Sec":
+			im.execs = val
+		case "User Calls Per Sec":
+			im.calls = val
+		case "User Transaction Per Sec":
+			im.tnxs = val
+		case "Logical Reads Per Sec":
+			im.lios = val
+		case "Physical Reads Per Sec":
+			im.phyrd = val
+		case "Physical Writes Per Sec":
+			im.phywr = val
+		case "DB Block Gets Per Sec":
+			im.blkgets = val
+		case "DB Block Changes Per Sec":
+			im.blkchng = val
+		case "Redo Generated Per Sec":
+			im.redomb = val
+		}
+	}
+	return im, nil
 }
 
 func db_get_stats(db *sqlx.DB) (map[string]int64, error) {
@@ -579,6 +679,15 @@ func conv216(i int) int {
 	return cnt
 }
 
+func c216(r, g, b int) int {
+	if r == g && g == b && r != 0 && r != 255 {
+		return 16 + 216 + r
+	} else {
+		return 16 + conv216(r)*36 + conv216(g)*6 + conv216(b) + 1
+	}
+}
+
+/*
 func c216(r, g, b int) ui.Attribute {
 	if r == g && g == b && r != 0 && r != 255 {
 		return (ui.Attribute)(16 + 216 + r)
@@ -586,3 +695,4 @@ func c216(r, g, b int) ui.Attribute {
 		return (ui.Attribute)(16 + conv216(r)*36 + conv216(g)*6 + conv216(b) + 1) // +1 is a temporary dirty hack
 	}
 }
+*/
