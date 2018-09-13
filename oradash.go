@@ -109,23 +109,23 @@ func printTemplate(S map[string]F) {
 		"│ DB CPU Time Ratio:        │ Calls/s:          │ PhyRD/s:         │ Blk Chng/s:           │\n" +
 		"│ AvgActive Sessions:       │ Tnxs/s:           │ PhyWR/s:         │ Redo MB/s:            │\n" +
 		"└──────────────────────────────────────────────────────────────────────────────────────────┘\n" +
-		"┌ \x1b[38;5;230mTOP SQL_ID (child#)\x1b[38;5;252m ────────┬ \x1b[38;5;230mTOP SESSIONS\x1b[38;5;252m ──────┬┬ \x1b[38;5;230mTOP WAITS\x1b[38;5;252m ──────────────────────────────┬ \x1b[38;5;230mWAIT CLASS\x1b[38;5;252m ───┐\n" +
+		"┌ \x1b[38;5;230mTOP SQL_ID (child#)\x1b[38;5;252m ────────┬ \x1b[38;5;230mTOP SESSIONS\x1b[38;5;252m ──────┐┌ \x1b[38;5;230mTOP WAITS\x1b[38;5;252m ──────────────────────────────┬ \x1b[38;5;230mWAIT CLASS\x1b[38;5;252m ───┐\n" +
 		"│                             │                    ││                                         │               │\n" +
 		"│                             │                    ││                                         │               │\n" +
 		"│                             │                    ││                                         │               │\n" +
 		"│                             │                    ││                                         │               │\n" +
 		"│                             │                    ││                                         │               │\n" +
 		"└─────────────────────────────┴────────────────────┘└─────────────────────────────────────────┴───────────────┘\n" +
-		"┌ \x1b[38;5;230mSQL_ID\x1b[38;5;252m ──────┬ \x1b[38;5;230mPLAN_HASH_VALUE\x1b[38;5;252m ┬ \x1b[38;5;230mSQL_TEXT\x1b[38;5;252m ──────────────────────────────────────────────────────────────────┐\n" +
-		"│              │                 │                                                                            │\n" +
-		"│              │                 │                                                                            │\n" +
-		"│              │                 │                                                                            │\n" +
-		"│              │                 │                                                                            │\n" +
-		"│              │                 │                                                                            │\n" +
-		"│              │                 │                                                                            │\n" +
-		"│              │                 │                                                                            │\n" +
-		"│              │                 │                                                                            │\n" +
-		"└──────────────┴─────────────────┴────────────────────────────────────────────────────────────────────────────┘\n"
+		"┌ \x1b[38;5;230mSQL_ID\x1b[38;5;252m ───────┬ \x1b[38;5;230mPLAN_HV\x1b[38;5;252m ────┬ \x1b[38;5;230mSQL_TEXT\x1b[38;5;252m ─────────────────────────────────────────────────────────────────────┐\n" +
+		"│               │             │                                                                               │\n" +
+		"│               │             │                                                                               │\n" +
+		"│               │             │                                                                               │\n" +
+		"│               │             │                                                                               │\n" +
+		"│               │             │                                                                               │\n" +
+		"│               │             │                                                                               │\n" +
+		"│               │             │                                                                               │\n" +
+		"│               │             │                                                                               │\n" +
+		"└───────────────┴─────────────┴───────────────────────────────────────────────────────────────────────────────┘\n"
 	fmt.Print(Cls, xy(0, 0), fg(252), bg(235)) // c216(0xff, 0xff, 0xaf)), bg(234))
 	for _, l := range strings.Split(tmplt, "\n") {
 		fmt.Println(l)
@@ -167,8 +167,11 @@ func main() {
 	S["redomb"] = F{78, 4, 13, 1}
 	S["topsqlids"] = F{4, 7, 24, 5}
 	S["topsids"] = F{33, 7, 18, 5}
-	S["events"] = F{60, 7, 32, 5}
+	S["events"] = F{54, 7, 38, 5}
 	S["waitclasses"] = F{97, 7, 14, 5}
+	S["sqlid"] = F{3, 14, 13, 5}
+	S["phv"] = F{19, 14, 11, 5}
+	S["sqltext"] = F{33, 14, 78, 5}
 
 	flag.Parse()
 
@@ -194,13 +197,6 @@ func main() {
 	}
 	defer db.Close()
 
-	/*
-		_, err = db_get_stats(db)
-		if err != nil {
-			panic(err)
-		}
-	*/
-
 	exec.Command("stty", "-F", "/dev/tty", "cbreak", "min", "1").Run()
 	// do not display entered characters on the screen
 	exec.Command("stty", "-F", "/dev/tty", "-echo").Run()
@@ -218,7 +214,7 @@ func main() {
 	}
 
 	printTemplate(S)
-	displayMetrics(im, S)
+	printMetrics(im, S)
 
 	sqlidrows, err := ashTopSqlids(db)
 	if err != nil {
@@ -237,6 +233,12 @@ func main() {
 		panic(err)
 	}
 	printTopEvents(events, S)
+
+	sqls, err := getSqls(db, sqlidrows)
+	if err != nil {
+		panic(err)
+	}
+	printSqls(sqls, S)
 
 	var b []byte = make([]byte, 1)
 
@@ -266,7 +268,7 @@ loop:
 			if err != nil {
 				panic(err)
 			}
-			displayMetrics(im, S)
+			printMetrics(im, S)
 
 			sqlidrows, err := ashTopSqlids(db)
 			if err != nil {
@@ -286,6 +288,12 @@ loop:
 			}
 			printTopEvents(events, S)
 
+			sqls, err := getSqls(db, sqlidrows)
+			if err != nil {
+				panic(err)
+			}
+			printSqls(sqls, S)
+
 			fmt.Print(xy(0, 23))
 			fmt.Print("\x1b[?25l") // turn off cursor
 		}
@@ -302,39 +310,63 @@ loop:
 }
 
 func printTopSqlids(sqlidrows []SqlidRow, S map[string]F) {
-	if len(sqlidrows) > 0 {
-		sF, _ := S["topsqlids"]
-		for i, sqlid := range sqlidrows {
-			val := fmt.Sprintf("%3d%% | %18s", sqlid.Seconds*100/300, fmt.Sprintf("%s (%d)", sqlid.Sql_id.String, sqlid.Sql_child_number.Int64))
-			fmt.Print(xy(sF.x+sF.w-len(val), sF.y+i), val)
-		}
+	sF, _ := S["topsqlids"]
+	for i, sqlid := range sqlidrows {
+		val := fmt.Sprintf("%3d%% | %18s", sqlid.Seconds*100/300, fmt.Sprintf("%s (%d)", sqlid.Sql_id.String, sqlid.Sql_child_number.Int64))
+		fmt.Print(xy(sF.x+sF.w-len(val), sF.y+i), val)
+	}
+	for i := len(sqlidrows); i < 5; i++ {
+		fmt.Print(xy(sF.x, sF.y+i), "                        ")
 	}
 }
 
 func printTopSids(sids []SessionRow, S map[string]F) {
-	if len(sids) > 0 {
-		sF, _ := S["topsids"]
-		for i, sid := range sids {
-			val := fmt.Sprintf("%3d%% | %11s", sid.Seconds*100/300, fmt.Sprintf("%s,%s", sid.Sid.String, sid.Serial.String))
-			fmt.Print(xy(sF.x+sF.w-len(val), sF.y+i), val)
-		}
+	sF, _ := S["topsids"]
+	for i, sid := range sids {
+		val := fmt.Sprintf("%3d%% | %11s", sid.Seconds*100/300, fmt.Sprintf("%s,%s", sid.Sid.String, sid.Serial.String))
+		fmt.Print(xy(sF.x+sF.w-len(val), sF.y+i), val)
+	}
+	for i := len(sids); i < 5; i++ {
+		fmt.Print(xy(sF.x, sF.y+i), "                  ")
 	}
 }
 
 func printTopEvents(events []EventRow, S map[string]F) {
-	if len(events) > 0 {
-		F1, _ := S["events"]
-		F2, _ := S["waitclasses"]
-		for i, ev := range events {
-			val1 := fmt.Sprintf("%3d%% | %-30s", ev.Seconds*100/300, ev.Event.String)
-			val2 := fmt.Sprintf("%-14s", ev.Wait_class.String)
-			fmt.Print(xy(F1.x+F1.w-len(val1), F1.y+i), val1)
-			fmt.Print(xy(F2.x+F2.w-len(val2), F2.y+i), val2)
-		}
+	F1, _ := S["events"]
+	F2, _ := S["waitclasses"]
+	for i, ev := range events {
+		val1 := fmt.Sprintf("%3d%% | %-30s", ev.Seconds*100/300, ev.Event.String)
+		val2 := fmt.Sprintf("%-14s", ev.Wait_class.String)
+		fmt.Print(xy(F1.x+F1.w-len(val1), F1.y+i), val1)
+		fmt.Print(xy(F2.x+F2.w-len(val2), F2.y+i), val2)
+	}
+	for i := len(events); i < 5; i++ {
+		fmt.Print(xy(F1.x, F1.y+i), "                                      ")
+		fmt.Print(xy(F2.x, F2.y+i), "              ")
+	}
+
+}
+
+func printSqls(sqls []SqltextRow, S map[string]F) {
+	sF1, _ := S["sqlid"]
+	sF2, _ := S["phv"]
+	sF3, _ := S["sqltext"]
+	for i, sql := range sqls {
+		val1 := fmt.Sprintf("%-12s", sql.Sql_id)
+		val2 := fmt.Sprintf("%11d", sql.Plan.Int64)
+		val3 := fmt.Sprintf("%-78s", sql.Sqltext)
+		fmt.Print(xy(sF1.x+sF1.w-len(val1), sF1.y+i), val1)
+		fmt.Print(xy(sF2.x+sF2.w-len(val2), sF2.y+i), val2)
+		fmt.Print(xy(sF3.x+sF3.w-len(val3), sF3.y+i), val3)
+	}
+	for i := len(sqls); i < 5; i++ {
+		fmt.Print(xy(sF1.x, sF1.y+i), fmt.Sprintf("%13s", " ")) // "!********0*!")
+		fmt.Print(xy(sF2.x, sF2.y+i), fmt.Sprintf("%11s", " ")) //"!********0**!")
+		fmt.Print(xy(sF3.x, sF3.y+i), fmt.Sprintf("%78s", " ")) // "!********1*********2*********3*********4*********5*********6*********7*!")
 	}
 }
 
-func displayMetrics(im instanceMetrics, S map[string]F) {
+func printMetrics(im instanceMetrics, S map[string]F) {
 	fmt.Print(xy(20, 1), fg(230), "[ ", im.iname, " ", im.mtime, " ] ", fg(252)) // c216(0xff, 0xff, 0xaf)), bg(234))
 	printF(S, "cpuutil", fmt.Sprintf("%3.0f%%", im.cpuutil))
 	printF(S, "cpuratio", fmt.Sprintf("%3.0f%%", im.cpuratio))
@@ -448,7 +480,7 @@ func ashTopSqlids(db *sqlx.DB) ([]SqlidRow, error) {
 	 where sample_time >= sysdate-5/1440 group by sql_id,sql_child_number order by 3 desc
 	)
 	where rownum < 6`)
-	if err != nil {
+	if err != nil && err != sql.ErrNoRows {
 		return sqlidRows, err
 	}
 	for rows.Next() {
@@ -475,7 +507,7 @@ func ashTopSids(db *sqlx.DB) ([]SessionRow, error) {
 	 where sample_time >= sysdate-5/1440 group by session_id,session_serial# order by 3 desc
 	)
 	where rownum < 6`)
-	if err != nil {
+	if err != nil && err != sql.ErrNoRows {
 		return res, err
 	}
 	for rows.Next() {
@@ -503,7 +535,7 @@ func ashTopEvents(db *sqlx.DB) ([]EventRow, error) {
 	 group by decode(session_state,'ON CPU',session_state,event), wait_class order by 3 desc
 	)
 where rownum < 6`)
-	if err != nil {
+	if err != nil && err != sql.ErrNoRows {
 		return res, err
 	}
 	for rows.Next() {
@@ -522,25 +554,21 @@ type SqltextRow struct {
 	Parsing_User_Id sql.NullInt64 `db:"PARSING_USER_ID"`
 }
 
-type SqlStmt struct {
-	sqlid   string
-	plan    string
-	sqltext string
-	userid  int64
-}
-
 func getSqls(db *sqlx.DB, sql_ids []SqlidRow) ([]SqltextRow, error) {
 	var res []SqltextRow
 	var r SqltextRow
 	for _, sqlid := range sql_ids {
 		if sqlid.Sql_id.Valid {
-			row := db.QueryRowx("select distinct sql_id, plan_hash_value, sql_text, parsing_user_id\nfrom gv$sql\nwhere sql_id = :1 and child_number= :2", sqlid.Sql_id.String, sqlid.Sql_child_number.Int64)
-			row.StructScan(&r)
+			err := db.QueryRowx("select distinct sql_id, plan_hash_value, sql_text, parsing_user_id from v$sql where sql_id = :1 and child_number = :2", sqlid.Sql_id, sqlid.Sql_child_number).StructScan(&r)
+			if err != nil {
+				panic(err)
+			}
 
 			r.Sqltext = trimsql(r.Sqltext)
-			if len(r.Sqltext) > 153 {
-				r.Sqltext = r.Sqltext[:153]
+			if len(r.Sqltext) > 76 {
+				r.Sqltext = r.Sqltext[:76] + ".."
 			}
+			res = append(res, r)
 		}
 	}
 	return res, nil
