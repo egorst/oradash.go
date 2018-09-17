@@ -559,9 +559,10 @@ func getSqls(db *sqlx.DB, sql_ids []SqlidRow) ([]SqltextRow, error) {
 	var r SqltextRow
 	for _, sqlid := range sql_ids {
 		if sqlid.Sql_id.Valid {
-			err := db.QueryRowx("select distinct sql_id, plan_hash_value, sql_text, parsing_user_id from v$sql where sql_id = :1 and child_number = :2", sqlid.Sql_id, sqlid.Sql_child_number).StructScan(&r)
+			err := db.QueryRowx("select distinct sql_id, plan_hash_value, sql_text, parsing_user_id from v$sql where sql_id = :1 and child_number = :2", sqlid.Sql_id.String, sqlid.Sql_child_number.Int64).StructScan(&r)
 			if err != nil {
-				panic(err)
+				// just hide this error from caller
+				return res, nil
 			}
 
 			r.Sqltext = trimsql(r.Sqltext)
@@ -687,6 +688,9 @@ func trimsql(s string) string {
 			}
 		}
 		res += c
+	}
+	if string(res[0]) == " " {
+		res = res[1:]
 	}
 	return res
 }
