@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -36,18 +37,21 @@ type instanceMetrics struct {
 	iname string
 	mtime string
 	//
-	cpuutil  float32 // Host CPU Utilization (%)
-	cpuratio float32 // Database CPU Time Ratio
-	aas      float32 // Average Active Sessions
-	execs    float32 // Executions Per Sec
-	calls    float32 // User Calls Per Sec
-	tnxs     float32 // User Transaction Per Sec
-	lios     float32 // Logical Reads Per Sec
-	phyrd    float32 // Physical Reads Per Sec
-	phywr    float32 // Physical Writes Per Sec
-	blkgets  float32 // DB Block Gets Per Sec
-	blkchng  float32 // DB Block Changes Per Sec
-	redomb   float32 // Redo Generated Per Sec
+	cpuutil     float32 // Host CPU Utilization (%)
+	cpuratio    float32 // Database CPU Time Ratio
+	aas         float32 // Average Active Sessions
+	execs       float32 // Executions Per Sec
+	calls       float32 // User Calls Per Sec
+	tnxs        float32 // User Transaction Per Sec
+	lios        float32 // Logical Reads Per Sec
+	phyrd       float32 // Physical Reads Per Sec
+	phywr       float32 // Physical Writes Per Sec
+	blkgets     float32 // DB Block Gets Per Sec
+	blkchng     float32 // DB Block Changes Per Sec
+	redomb      float32 // Redo Generated Per Sec
+	fullindscan float32 // Full Index Scans Per Sec
+	totindscan  float32 // Total Index Scans Per Sec
+	tottabscan  float32 // Total Table Scans Per Sec
 }
 
 type SessionRecord struct {
@@ -75,6 +79,7 @@ type F struct {
 
 var stat1, stat2 map[string]int64
 var Cls = "\x1b[2J"
+var BoldFont = "\x1b[1m"
 
 func xy(x int, y int) string {
 	return fmt.Sprintf("\x1b[%d;%dH", y, x)
@@ -96,40 +101,42 @@ func puts(s string, x int, y int, f int, b int) {
 
 //var borderLabelFg = c216(0xee, 0xbb, 0x44)
 //var sysStatementFg = c216(8, 8, 8)
+type ScreenParams struct {
+	Tfg string // title Fg
+	Dfg string // default Fg
+	H   string // header Fg
+}
+
+const screenTemplate = `┌ {{.Tfg}}INSTANCE METRICS{{.Dfg}} ───────────────────────────────────────────────────────────────────────────────────────────┐
+│ {{.H}}CPU Util:{{.Dfg}}              │ {{.H}}Execs/s:{{.Dfg}}          │ {{.H}}LRDs/s:{{.Dfg}}          │ {{.H}}Blk Gets/s:{{.Dfg}}          │ {{.H}}FulIdxSc/s:{{.Dfg}}          │
+│ {{.H}}DB CPU TmRatio:{{.Dfg}}        │ {{.H}}Calls/s:{{.Dfg}}          │ {{.H}}PhyRD/s:{{.Dfg}}         │ {{.H}}Blk Chng/s:{{.Dfg}}          │ {{.H}}TotIdxSc/s:{{.Dfg}}          │
+│ {{.H}}AvgAct Sessions:{{.Dfg}}       │ {{.H}}Tnxs/s:{{.Dfg}}           │ {{.H}}PhyWR/s:{{.Dfg}}         │ {{.H}}Redo MB/s:{{.Dfg}}           │ {{.H}}TotTblSc/s:{{.Dfg}}          │
+└─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ {{.Tfg}}TOP SQL_ID (child#){{.Dfg}} ────────┬ {{.Tfg}}TOP SESSIONS{{.Dfg}} ──────┐┌ {{.Tfg}}TOP WAITS{{.Dfg}} ──────────────────────────────┬ {{.Tfg}}WAIT CLASS{{.Dfg}} ───┐
+│                             │                    ││                                         │               │
+│                             │                    ││                                         │               │
+│                             │                    ││                                         │               │
+│                             │                    ││                                         │               │
+│                             │                    ││                                         │               │
+└─────────────────────────────┴────────────────────┘└─────────────────────────────────────────┴───────────────┘
+┌ {{.Tfg}}SQL_ID{{.Dfg}} ───────┬ {{.Tfg}}PLAN_HV{{.Dfg}} ────┬ {{.Tfg}}SQL_TEXT{{.Dfg}} ─────────────────────────────────────────────────────────────────────┐
+│               │             │                                                                               │
+│               │             │                                                                               │
+│               │             │                                                                               │
+│               │             │                                                                               │
+│               │             │                                                                               │
+└───────────────┴─────────────┴───────────────────────────────────────────────────────────────────────────────┘`
 
 func printTemplate(S map[string]F) {
-
-	//	tmplt := "┌ \x1b[38;5;230mINSTANCE SUMMARY\x1b[38;5;252m ───────────────────────────────────────────────────────────────────────────────────────────┐\n" +
-	//		"│  Instance:                │ Execs/s:          │ sParse/s:         │ LIOs/s:          │ Read MB/s:           │\n" +
-	//		"│  Cur Time:                │ Calls/s:          │ hParse/s:         │ PhyRD/s:         │ Writ MB/s:           │\n" +
-	//		"│  Sessions a/b:            │ Commits:          │ ccHits/s:         │ PhyWR/s:         │ Redo MB/s:           │\n" +
-	//		"└─────────────────────────────────────────────────────────────────────────────────────────────────────────────┘\n" +
-	tmplt := "┌ \x1b[38;5;230mINSTANCE METRICS\x1b[38;5;252m ────────────────────────────────────────────────────────────────────────┐\n" +
-		"│ CPU Util:                 │ Execs/s:          │ LRDs/s:          │ Blk Gets/s:           │\n" +
-		"│ DB CPU Time Ratio:        │ Calls/s:          │ PhyRD/s:         │ Blk Chng/s:           │\n" +
-		"│ AvgActive Sessions:       │ Tnxs/s:           │ PhyWR/s:         │ Redo MB/s:            │\n" +
-		"└──────────────────────────────────────────────────────────────────────────────────────────┘\n" +
-		"┌ \x1b[38;5;230mTOP SQL_ID (child#)\x1b[38;5;252m ────────┬ \x1b[38;5;230mTOP SESSIONS\x1b[38;5;252m ──────┐┌ \x1b[38;5;230mTOP WAITS\x1b[38;5;252m ──────────────────────────────┬ \x1b[38;5;230mWAIT CLASS\x1b[38;5;252m ───┐\n" +
-		"│                             │                    ││                                         │               │\n" +
-		"│                             │                    ││                                         │               │\n" +
-		"│                             │                    ││                                         │               │\n" +
-		"│                             │                    ││                                         │               │\n" +
-		"│                             │                    ││                                         │               │\n" +
-		"└─────────────────────────────┴────────────────────┘└─────────────────────────────────────────┴───────────────┘\n" +
-		"┌ \x1b[38;5;230mSQL_ID\x1b[38;5;252m ───────┬ \x1b[38;5;230mPLAN_HV\x1b[38;5;252m ────┬ \x1b[38;5;230mSQL_TEXT\x1b[38;5;252m ─────────────────────────────────────────────────────────────────────┐\n" +
-		"│               │             │                                                                               │\n" +
-		"│               │             │                                                                               │\n" +
-		"│               │             │                                                                               │\n" +
-		"│               │             │                                                                               │\n" +
-		"│               │             │                                                                               │\n" +
-		"│               │             │                                                                               │\n" +
-		"│               │             │                                                                               │\n" +
-		"│               │             │                                                                               │\n" +
-		"└───────────────┴─────────────┴───────────────────────────────────────────────────────────────────────────────┘\n"
-	fmt.Print(Cls, xy(0, 0), fg(252), bg(235)) // c216(0xff, 0xff, 0xaf)), bg(234))
-	for _, l := range strings.Split(tmplt, "\n") {
-		fmt.Println(l)
+	// tfg 214-yellow 34-darkgreen 22-darkestgreen
+	sp := ScreenParams{Tfg: "\x1b[38;5;17m", Dfg: "\x1b[38;5;16m", H: "\x1b[38;5;17m"}
+	t := template.Must(template.New("screenTemplate").Parse(screenTemplate))
+	fmt.Print(BoldFont, fg(16), bg(255), Cls, xy(1, 1)) // c216(0xff, 0xff, 0xaf)), bg(234))
+	err := t.Execute(os.Stdout, sp)
+	if err != nil {
+		panic("executing template:" + err.Error())
 	}
+	fmt.Print(fg(16), bg(255))
 	fmt.Print(xy(1, 23))
 }
 
@@ -150,21 +157,21 @@ func curset(i byte) error {
 
 func main() {
 	S := make(map[string]F)
-	S["cpuutil"] = F{13, 2, 15, 1}
-	S["cpuratio"] = F{13, 3, 15, 1}
-	S["aas"] = F{23, 4, 5, 1}
-	S["execs"] = F{39, 2, 9, 1}
-	S["calls"] = F{39, 3, 9, 1}
-	S["tnxs"] = F{39, 4, 9, 1}
-	S["lios"] = F{59, 2, 8, 1}
-	S["phyrd"] = F{60, 3, 7, 1}
-	S["phywr"] = F{60, 4, 7, 1}
-	//S["lios"] = F{78, 2, 8, 1}
-	//S["phyrd"] = F{78, 3, 7, 1}
-	//S["phywr"] = F{78, 4, 7, 1}
-	S["blkgets"] = F{79, 2, 12, 1}
-	S["blkchng"] = F{79, 3, 12, 1}
-	S["redomb"] = F{78, 4, 13, 1}
+	S["cpuutil"] = F{10, 2, 15, 1}
+	S["cpuratio"] = F{10, 3, 15, 1}
+	S["aas"] = F{20, 4, 5, 1}
+	S["execs"] = F{36, 2, 9, 1}
+	S["calls"] = F{36, 3, 9, 1}
+	S["tnxs"] = F{36, 4, 9, 1}
+	S["lios"] = F{56, 2, 8, 1}
+	S["phyrd"] = F{57, 3, 7, 1}
+	S["phywr"] = F{57, 4, 7, 1}
+	S["blkgets"] = F{77, 2, 10, 1}
+	S["blkchng"] = F{77, 3, 10, 1}
+	S["redomb"] = F{76, 4, 11, 1}
+	S["fullindscan"] = F{100, 2, 10, 1}
+	S["totindscan"] = F{100, 3, 10, 1}
+	S["tottabscan"] = F{100, 4, 10, 1}
 	S["topsqlids"] = F{4, 7, 24, 5}
 	S["topsids"] = F{33, 7, 18, 5}
 	S["events"] = F{54, 7, 38, 5}
@@ -248,6 +255,7 @@ func main() {
 			os.Stdin.Read(b)
 			if b[0] == 0x1b {
 				close(quit)
+				return
 			}
 			//fmt.Println("I got the byte", b, "("+string(b)+")")
 		}
@@ -367,7 +375,7 @@ func printSqls(sqls []SqltextRow, S map[string]F) {
 }
 
 func printMetrics(im instanceMetrics, S map[string]F) {
-	fmt.Print(xy(20, 1), fg(230), "[ ", im.iname, " ", im.mtime, " ] ", fg(252)) // c216(0xff, 0xff, 0xaf)), bg(234))
+	fmt.Print(xy(20, 1), fg(17), "[ ", im.iname, " ", im.mtime, " ] ", fg(16)) // c216(0xff, 0xff, 0xaf)), bg(234))
 	printF(S, "cpuutil", fmt.Sprintf("%3.0f%%", im.cpuutil))
 	printF(S, "cpuratio", fmt.Sprintf("%3.0f%%", im.cpuratio))
 	printF(S, "aas", fmt.Sprintf("%5.1f", im.aas))
@@ -380,6 +388,9 @@ func printMetrics(im instanceMetrics, S map[string]F) {
 	printF(S, "blkgets", fmt.Sprintf("%7.0f", im.blkgets))
 	printF(S, "blkchng", fmt.Sprintf("%7.0f", im.blkchng))
 	printF(S, "redomb", fmt.Sprintf("%7.0f", im.redomb/1024/1024))
+	printF(S, "fullindscan", fmt.Sprintf("%7.0f", im.fullindscan))
+	printF(S, "totindscan", fmt.Sprintf("%7.0f", im.totindscan))
+	printF(S, "tottabscan", fmt.Sprintf("%7.0f", im.tottabscan))
 }
 
 func logerr(e string) {
@@ -395,6 +406,7 @@ func logerr(e string) {
 	}
 }
 
+// not used right now
 func getInstanceSummary(db *sqlx.DB) instanceSummary {
 	var is instanceSummary
 	var iname string
@@ -477,7 +489,7 @@ func ashTopSqlids(db *sqlx.DB) ([]SqlidRow, error) {
 	rows, err := db.Queryx(`select * from 
 	(select sql_id, sql_child_number, count(*) seconds 
 	 from v$active_session_history 
-	 where sample_time >= sysdate-5/1440 group by sql_id,sql_child_number order by 3 desc
+	 where sql_id is not null and sample_time >= sysdate-5/1440 group by sql_id,sql_child_number order by 3 desc
 	)
 	where rownum < 6`)
 	if err != nil && err != sql.ErrNoRows {
@@ -593,7 +605,8 @@ where group_id=3 and metric_name in (
   'Average Active Sessions', 'Host CPU Utilization (%)', 'Database CPU Time Ratio',
   'Executions Per Sec', 'User Calls Per Sec', 'User Transaction Per Sec',
   'Logical Reads Per Sec', 'Physical Reads Per Sec', 'Physical Writes Per Sec',
-  'DB Block Gets Per Sec', 'DB Block Changes Per Sec', 'Redo Generated Per Sec'
+  'DB Block Gets Per Sec', 'DB Block Changes Per Sec', 'Redo Generated Per Sec',
+  'Full Index Scans Per Sec', 'Total Index Scans Per Sec', 'Total Table Scans Per Sec'
 )`)
 	if err != nil {
 		return im, err
@@ -632,6 +645,12 @@ where group_id=3 and metric_name in (
 			im.blkchng = val
 		case "Redo Generated Per Sec":
 			im.redomb = val
+		case "Full Index Scans Per Sec":
+			im.fullindscan = val
+		case "Total Index Scans Per Sec":
+			im.totindscan = val
+		case "Total Table Scans Per Sec":
+			im.tottabscan = val
 		}
 	}
 	return im, nil
